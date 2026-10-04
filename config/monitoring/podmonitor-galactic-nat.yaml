@@ -1,0 +1,22 @@
+# Scrapes galactic-nat's metrics port (metrics, 9182) on every egress shard:
+# the datapath's drop reasons and connection-table occupancy, and the uplinks'
+# per-queue NIC receive counters. The pod uses hostNetwork, so its pod IP is
+# the node's own.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: galactic-nat
+  labels:
+    app.kubernetes.io/name: galactic-nat
+spec:
+  # job="galactic-nat", which the alert rules match on.
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-nat
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

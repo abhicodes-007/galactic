@@ -374,10 +374,12 @@ kubectl get bgpadvertisement -n galactic-system | grep nat66
 
 Metrics, exposed on `GALACTIC_NAT_METRICS_PORT` (`9182` by default):
 
-| Metric                     | Type    | Labels   | Meaning                                                                                                                                                                                                                                                                             |
-| -------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic_nat_conns`       | Gauge   | —        | Current row count in this shard's `nat_conn_table` — a point-in-time snapshot of an LRU, so it can fluctuate independently of actual live traffic under memory pressure.                                                                                                          |
-| `galactic_nat_drops_total` | Counter | `reason` | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly. |
+| Metric                                        | Type    | Labels                         | Meaning                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------- | ------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_nat_conns`                          | Gauge   | —                              | Current row count in this shard's `nat_conn_table` — a point-in-time snapshot of an LRU, so it can fluctuate independently of actual live traffic under memory pressure.                                                                                                                                                                                                               |
+| `galactic_nat_drops_total`                    | Counter | `reason`                       | Packets dropped by the `nat_ingress` program, by reason. Cumulative for the life of the *node*, not the process: the counters live in a map pinned under `natattach.PinDir`, which a restarting shard reuses as-is. Always read it as a delta — an absolute value includes every transient the node has ever seen, and zeroing it takes `bpftool map update` against the pin directly. |
+| `galactic_nat_uplink_rx_queue_packets_total`  | Counter | `interface`, `driver`, `queue` | Packets one NIC receive queue of an uplink received, from the driver's `ethtool -S` statistics. Exported for `bnxt_en`, `ixgbe`, `ice`, `i40e` and `mlx5_core`; any other driver exports nothing.                                                                                                                                                                                      |
+| `galactic_nat_uplink_rx_queue_discards_total` | Counter | `interface`, `driver`, `queue` | Packets one NIC receive queue of an uplink discarded before the datapath saw them, so `galactic_nat_drops_total` never counts them. Only drivers that count discards per queue report it: `bnxt_en` today.                                                                                                                                                                             |
 
 Drop reasons currently defined (`internal/plumbing/ebpf/natprog/dropreason.go`):
 
@@ -516,6 +518,21 @@ knowing before you rely on this component in production:
   interfaces the gateway attaches to, and waits at startup for a map only
   the gateway creates. With the gateway gone, the slot keeps the shard's
   program alive but nothing calls it.
+- **One NIC receive queue on a `bnxt_en` uplink can stall.** The queue
+  drops a steady share of its packets while the CPU sits idle, and every
+  flow hashed to it fails on each retry: tenant egress times out per flow,
+  and a BGP session on that queue expires its hold timer
+  ([#673](https://github.com/datum-cloud/galactic/issues/673)). It has only
+  been seen on `bnxt_en` uplinks with this datapath attached, never on
+  `ixgbe` or on fabric links, which carry no XDP program. The trigger is not
+  known. The NIC drops the packets before the datapath runs, so
+  `galactic_nat_drops_total` stays flat; the signal is one queue standing out
+  in `galactic_nat_uplink_rx_queue_discards_total`, and
+  `GalacticNatUplinkRxQueueStalled` (`config/monitoring/`) alerts on it. To
+  clear it, confirm the uplink's bond partner is up and carrying traffic, then
+  bounce the affected member (`ip link set <member> down; ip link set
+  <member> up`). The bond partner carries traffic meanwhile, and the queue's
+  discards stop at once. Nothing bounces it automatically.
 - **The CNI's shard list is a second copy of every shard SID.**
   `GALACTIC_CNI_EGRESS_SHARD_SIDS` is set by hand and is not derived from
   `EgressShard` status, so the two can disagree.
